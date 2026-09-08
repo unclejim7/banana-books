@@ -1,0 +1,232 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- Auth / Tenancy ----------
+
+model User {
+  id           String       @id @default(cuid())
+  name         String
+  email        String       @unique
+  passwordHash String
+  createdAt    DateTime     @default(now())
+  memberships  Membership[]
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model Organization {
+  id                   String              @id @default(cuid())
+  name                 String
+  fiscalYearStartMonth Int                 @default(1)
+  createdAt            DateTime            @default(now())
+  memberships          Membership[]
+  ledgerAccounts       LedgerAccount[]
+  statements           Statement[]
+  transactions         Transaction[]
+  rules                CategorizationRule[]
+  journalEntries       JournalEntry[]
+  closePeriods         ClosePeriod[]
+}
+
+model Membership {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  role           Role         @default(OWNER)
+  createdAt      DateTime     @default(now())
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+}
+
+// ---------- Chart of Accounts ----------
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  INCOME
+  EXPENSE
+}
+
+enum CashFlowSection {
+  OPERATING
+  INVESTING
+  FINANCING
+  NONE
+}
+
+model LedgerAccount {
+  id              String          @id @default(cuid())
+  organizationId  String
+  code            String
+  name            String
+  type            AccountType
+  cashFlowSection CashFlowSection @default(OPERATING)
+  isCashAccount   Boolean         @default(false)
+  excludeFromCashFlow Boolean     @default(false)
+  isSystem        Boolean         @default(false)
+  archived        Boolean         @default(false)
+  description     String?
+  createdAt       DateTime        @default(now())
+
+  organization        Organization         @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  statements           Statement[]
+  transactionsAsBank   Transaction[]        @relation("BankAccountTransactions")
+  transactionsAsCategory Transaction[]      @relation("CategoryAccountTransactions")
+  rules                CategorizationRule[]
+  journalLines         JournalLine[]
+
+  @@unique([organizationId, code])
+}
+
+// ---------- Statements & Transactions ----------
+
+enum StatementFileType {
+  CSV
+  OFX
+  QFX
+  PDF
+}
+
+enum StatementStatus {
+  PENDING
+  PROCESSED
+  ERROR
+}
+
+model Statement {
+  id             String            @id @default(cuid())
+  organizationId String
+  ledgerAccountId String
+  fileName       String
+  fileType       StatementFileType
+  periodYear     Int
+  periodMonth    Int
+  status         StatementStatus   @default(PENDING)
+  errorMessage   String?
+  transactionCount Int             @default(0)
+  uploadedById   String
+  uploadedAt     DateTime          @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ledgerAccount LedgerAccount @relation(fields: [ledgerAccountId], references: [id])
+  transactions  Transaction[]
+
+  @@index([organizationId, periodYear, periodMonth])
+}
+
+model Transaction {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  statementId         String
+  ledgerAccountId     String
+  date                DateTime
+  description         String
+  rawDescription       String
+  amount              Decimal  @db.Decimal(14, 2)
+  categorizedAccountId String?
+  isExcluded          Boolean  @default(false)
+  excludeReason       String?
+  periodYear          Int
+  periodMonth         Int
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  organization      Organization   @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  statement         Statement      @relation(fields: [statementId], references: [id], onDelete: Cascade)
+  ledgerAccount     LedgerAccount  @relation("BankAccountTransactions", fields: [ledgerAccountId], references: [id])
+  categorizedAccount LedgerAccount? @relation("CategoryAccountTransactions", fields: [categorizedAccountId], references: [id])
+  journalEntry      JournalEntry?
+
+  @@index([organizationId, periodYear, periodMonth])
+  @@index([organizationId, categorizedAccountId])
+}
+
+enum RuleMatchType {
+  CONTAINS
+  STARTS_WITH
+  EXACT
+  REGEX
+}
+
+model CategorizationRule {
+  id              String        @id @default(cuid())
+  organizationId  String
+  pattern         String
+  matchType       RuleMatchType @default(CONTAINS)
+  ledgerAccountId String
+  priority        Int           @default(0)
+  createdAt       DateTime      @default(now())
+
+  organization  Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  ledgerAccount LedgerAccount @relation(fields: [ledgerAccountId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+}
+
+// ---------- General Ledger ----------
+
+model JournalEntry {
+  id             String   @id @default(cuid())
+  organizationId String
+  date           DateTime
+  memo           String
+  transactionId  String?  @unique
+  periodYear     Int
+  periodMonth    Int
+  createdAt      DateTime @default(now())
+
+  organization Organization  @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  transaction  Transaction?  @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  lines        JournalLine[]
+
+  @@index([organizationId, periodYear, periodMonth])
+}
+
+model JournalLine {
+  id             String   @id @default(cuid())
+  journalEntryId String
+  ledgerAccountId String
+  debit          Decimal  @default(0) @db.Decimal(14, 2)
+  credit         Decimal  @default(0) @db.Decimal(14, 2)
+  memo           String?
+
+  journalEntry  JournalEntry  @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  ledgerAccount LedgerAccount @relation(fields: [ledgerAccountId], references: [id])
+
+  @@index([ledgerAccountId])
+}
+
+// ---------- Month-End Close ----------
+
+enum ClosePeriodStatus {
+  OPEN
+  CLOSED
+}
+
+model ClosePeriod {
+  id             String            @id @default(cuid())
+  organizationId String
+  year           Int
+  month          Int
+  status         ClosePeriodStatus @default(OPEN)
+  closedAt       DateTime?
+  closedById     String?
+  notes          String?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, year, month])
+}
